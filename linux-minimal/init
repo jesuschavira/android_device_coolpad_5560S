@@ -116,6 +116,32 @@ else
   stage 4 bad "no android_usb gadget"
 fi
 
+# ---- phase 2: boot Alpine from alpine.img on the SD card -------------------
+# Falls back to this initramfs (telnet shell) if no card/image/rootfs is found.
+try_alpine() {
+  mkdir -p /mnt/sd /newroot
+  n=0
+  while [ ! -b /dev/mmcblk1p1 ] && [ $n -lt 8 ]; do sleep 1; mdev -s; n=$((n+1)); done
+  [ -b /dev/mmcblk1p1 ] || { echo "alpine: no SD card (mmcblk1p1)"; return 1; }
+  mount -t vfat -o rw,noatime /dev/mmcblk1p1 /mnt/sd || { echo "alpine: cannot mount SD as vfat"; return 1; }
+  [ -f /mnt/sd/alpine.img ] || { echo "alpine: /alpine.img not found on SD"; umount /mnt/sd; return 1; }
+  for i in 0 1 2 3; do [ -b /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done
+  mount -t ext4 -o loop,noatime /mnt/sd/alpine.img /newroot || { echo "alpine: cannot loop-mount alpine.img"; umount /mnt/sd; return 1; }
+  [ -x /newroot/bin/busybox ] && [ -L /newroot/sbin/init ] || { echo "alpine: busybox or /sbin/init missing in image"; umount /newroot; umount /mnt/sd; return 1; }
+  return 0
+}
+if try_alpine; then
+  stage 6 ok "alpine rootfs mounted; switching root"
+  mkdir -p /newroot/var/log && cp $LOG /newroot/var/log/phase1.log
+  killall telnetd 2>/dev/null   # phase-1 shell has no auth; Alpine runs dropbear instead
+  mkdir -p /newroot/proc /newroot/sys /newroot/dev
+  mount --move /proc /newroot/proc
+  mount --move /sys  /newroot/sys
+  mount --move /dev  /newroot/dev
+  exec switch_root /newroot /sbin/init </newroot/dev/console >/newroot/dev/console 2>&1
+fi
+stage 6 bad "alpine not started (see /init.log); staying in initramfs"
+
 # log to expose via telnet / future phases
 ln -sf /tmp/init.log /init.log
 

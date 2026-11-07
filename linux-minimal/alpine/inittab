@@ -1,0 +1,5 @@
+# busybox init for the Coolpad (no OpenRC: kernel 3.4 + 512 MB, keep it simple)
+::sysinit:/bin/sh /etc/boot.sh
+::respawn:/bin/sh -c 'exec /usr/sbin/dropbear -F -R -E -p 22 $(cat /run/dropbear.opts 2>/dev/null)'
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/umount -a -r
