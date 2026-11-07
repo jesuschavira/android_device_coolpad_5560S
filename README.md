@@ -38,7 +38,7 @@ The version string points to a Qualcomm CAF msm-3.4 base (`g9b6969a`) with Coolp
 # TWRP minimal manifest (omni-based), e.g. twrp-6.0 or twrp-7.1
 repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git -b twrp-7.1
 repo sync
-git clone https://github.com/<user>/android_device_coolpad_5560S device/coolpad/5560S
+git clone https://github.com/jesuschavira/android_device_coolpad_5560S device/coolpad/5560S
 . build/envsetup.sh
 lunch omni_5560S-eng
 make recoveryimage
