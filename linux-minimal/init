@@ -1,0 +1,126 @@
+#!/bin/busybox sh
+# Minimal Linux for Coolpad 5560S (MSM8610, stock 3.4 kernel) - phase 1.
+# Goals: bring up the screen, an USB link and a shell. Progress is shown as
+# a row of bars on the framebuffer (green = stage OK, gray = failed), because
+# the stock kernel has no VT/fbcon.
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+mkdir -p /proc /sys /dev /tmp /mnt /etc
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t tmpfs -o mode=0755,size=4m tmpfs /dev   # kernel has no devtmpfs
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /tmp
+echo /bin/mdev > /proc/sys/kernel/hotplug
+mdev -s
+[ -c /dev/console ] || mknod /dev/console c 5 1
+[ -c /dev/null ] || mknod /dev/null c 1 3
+[ -c /dev/tty ] || mknod /dev/tty c 5 0
+
+LOG=/tmp/init.log
+exec >>$LOG 2>&1
+echo "== coolpad linux-minimal =="; uname -a
+
+# ---- framebuffer status bars --------------------------------------------
+FB=/dev/fb0
+FBS=/sys/class/graphics/fb0
+fb_ready=0
+if [ -r $FBS/stride ] && [ -r $FBS/virtual_size ]; then
+  STRIDE=$(cat $FBS/stride)
+  BPP=$(cat $FBS/bits_per_pixel)
+  H=$(cut -d, -f2 $FBS/virtual_size)
+  echo "fb0: stride=$STRIDE bpp=$BPP virtual=$(cat $FBS/virtual_size)"
+  [ ! -c $FB ] && mknod $FB c 29 0
+  [ -c $FB ] && [ "$BPP" = 32 ] && fb_ready=1
+fi
+
+# paint ROWS lines starting at line START with byte-pattern PIX (4 bytes, octal)
+fb_bar() { # $1=slot(0..7) $2=color: ok|bad|white
+  [ $fb_ready = 1 ] || return
+  case $2 in
+    ok)    P='\000\377\000\377' ;;   # green in both RGBA and BGRA
+    bad)   P='\100\100\100\377' ;;   # dark gray
+    white) P='\377\377\377\377' ;;
+    *)     P='\000\000\000\377' ;;
+  esac
+  LINES_PER=60; START=$((60 + $1 * 90))
+  # one scanline: start from a 4-byte pixel file and double it until >= stride
+  printf "$P" > /tmp/line
+  while [ $(wc -c < /tmp/line) -lt $STRIDE ]; do
+    cat /tmp/line /tmp/line > /tmp/line2 && mv /tmp/line2 /tmp/line
+  done
+  head -c $STRIDE /tmp/line > /tmp/line2 && mv /tmp/line2 /tmp/line
+  j=0
+  while [ $j -lt $LINES_PER ]; do
+    dd if=/tmp/line of=$FB bs=$STRIDE seek=$((START + j)) conv=notrunc 2>/dev/null
+    j=$((j+1))
+  done
+}
+stage() { # $1=slot $2=ok|bad $3=message
+  echo "[stage $1] $2 $3"
+  fb_bar $1 $2
+}
+
+# clear screen black
+if [ $fb_ready = 1 ]; then
+  dd if=/dev/zero of=$FB bs=$STRIDE count=$H 2>/dev/null
+  stage 0 ok "framebuffer found"
+else
+  echo "no usable /dev/fb0 (need 32 bpp); continuing without display"
+fi
+
+# ---- backlight -----------------------------------------------------------
+bl_ok=0
+for d in /sys/class/leds/lcd-backlight /sys/class/leds/wled /sys/class/leds/*backlight* /sys/class/backlight/*; do
+  [ -d "$d" ] || continue
+  max=255; [ -r $d/max_brightness ] && max=$(cat $d/max_brightness)
+  echo "backlight: $d max=$max"
+  echo $max > $d/brightness 2>/dev/null && bl_ok=1
+done
+[ $bl_ok = 1 ] && stage 1 ok "backlight" || stage 1 bad "no backlight node (see /sys/class/leds)"
+
+# ---- block devices (for later phases) ------------------------------------
+[ -b /dev/block/mmcblk0 ] || [ -b /dev/mmcblk0 ] && stage 2 ok "emmc visible" || stage 2 bad "emmc not found"
+
+# ---- input (touch/keys) ---------------------------------------------------
+if grep -q . /proc/bus/input/devices 2>/dev/null; then
+  cp /proc/bus/input/devices /tmp/input-devices.txt
+  stage 3 ok "input devices"
+else
+  stage 3 bad "no input devices"
+fi
+
+# ---- USB gadget (Qualcomm android_usb) -----------------------------------
+G=/sys/class/android_usb/android0
+if [ -d $G ]; then
+  echo 0 > $G/enable
+  echo 18d1 > $G/idVendor
+  echo 4e24 > $G/idProduct
+  echo rndis > $G/functions 2>/dev/null
+  echo 1 > $G/enable
+  sleep 2
+  echo "android_usb functions: $(cat $G/functions)  state: $(cat $G/state 2>/dev/null)"
+  mdev -s
+  if [ -d /sys/class/net/usb0 ] || [ -d /sys/class/net/rndis0 ]; then
+    IF=usb0; [ -d /sys/class/net/rndis0 ] && IF=rndis0
+    ifconfig $IF 192.168.7.2 netmask 255.255.255.0 up
+    stage 4 ok "usb net $IF 192.168.7.2"
+    # NO authentication: reachable only over the USB cable (192.168.7.0/24).
+    telnetd -b 192.168.7.2 -l /bin/sh &
+    stage 5 ok "telnetd on 192.168.7.2:23"
+  else
+    stage 4 bad "rndis interface did not appear"
+  fi
+else
+  stage 4 bad "no android_usb gadget"
+fi
+
+# log to expose via telnet / future phases
+ln -sf /tmp/init.log /init.log
+
+stage 7 ok "init finished; idling"
+# also try the serial console, if someone wired one
+[ -c /dev/ttyHSL0 ] && setsid cttyhack sh </dev/ttyHSL0 >/dev/ttyHSL0 2>&1 &
+# PID 1 must never exit
+while true; do sleep 3600; done
